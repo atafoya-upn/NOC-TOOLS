@@ -17,3 +17,4 @@ UPGRADES/logs/reload920test.log
 UPGRADES/logs/upgrade_error.log
 UPGRADES/logs/netmiko_ug.log
 .env
+UPGRADES/logs/dev_info.log
