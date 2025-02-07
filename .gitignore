@@ -18,3 +18,4 @@ UPGRADES/logs/upgrade_error.log
 UPGRADES/logs/netmiko_ug.log
 .env
 UPGRADES/logs/dev_info.log
+UPGRADES/logs/dev_info.log
