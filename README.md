@@ -1,4 +1,4 @@
-# noc-tools
+# NOC-TOOLS
 
 ## Overview
 Main directory for the noc-tools project. Currently includes a script for collecting circuit IDs from production devices and a directory for scripts used in upgrading devices.
