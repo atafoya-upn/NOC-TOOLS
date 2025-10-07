@@ -27,7 +27,6 @@ import os
 import sys
 import re
 from getpass import getpass
-from netmiko import ConnLogOnly
 import signal
 import logging
 from datetime import datetime
@@ -37,8 +36,6 @@ import shutil
 import traceback
 import subprocess
 import platform
-from tqdm import tqdm
-from dotenv import load_dotenv
 from typing import Optional, Tuple, Dict, Callable
 import ipaddress
 
@@ -1409,5 +1406,5 @@ if __name__ == "__main__":
     ensure_dependencies()  # ensures dotenv, tqdm, netmiko exist
     from dotenv import load_dotenv
     from tqdm import tqdm
-    from netmiko import ConnectHandler  # or ConnLogOnly
+    from netmiko import ConnLogOnly
     raise SystemExit(main())
