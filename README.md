@@ -1,47 +1,223 @@
 # noc-tools
 
-Main directory for the noc-tools project.
+## Overview
+Main directory for the noc-tools project. Currently includes a script for collecting circuit IDs from production devices and a directory for scripts used in upgrading devices.
 
-    # Get_CKIDs.py
-    Used for collecting information from specified devices that are expected to be impacted by maintenance work. Gathers all the CKSIDs in the form of XXXXXXXX/XXXXXX/XXXXXXXX or XXXXXXXX-XXXXXX-XXXXXXXX listed in the configurations on any of our current Cisco routers. The market will still need to provide an impact list for any core equipment, as they are likely to affect services not explicitly listed in configuration files.
+---
 
-    # .env
-    Create a .env file to store all sensitive information used as variables in the scripts. This file is not secure and is only utilized to remove sensitive information from the scripts. Just remember that the only security this provides when storing on your local machine is through obfuscation. The.env file should be stored in the same directory as the scripts.
-    
-    These are the current keys expected to be used for variables in this project:
-    
-    FTP_SERVER="<IP>"
-    FTP_SERVER_BENCH="<IP>"
-    FTP_USER="<USERNAME>"
-    FTP_PASSWORD="<PASSWORD>"
-    TACACS_USER="<USERNAME>"
-    TACACS_PASSWORD="<PASSWORD>" # Will be using getpass in these scripts but that can easily be edited to allow pulling from the .env file.
-    BENCH_USER="<USERNAME>"
-    BENCH_PASSWORD="<PASSWORD>"
+## Scripts Included
 
-    FTP_SERVER is the IP address to reach the ftp server when doing upgrades on production routers or for anything on the provisioning bench in Albq.
-    FTP_SERVER_BENCH is the IP address to reach the ftp server when doing upgrades on the provisioning bench in all other markets.
-    FTP_USER is the username for downloading from the ftp server.
-    FTP_PASSWORD is the password for downloading from the ftp server.
-    TACACS_USER is the username for logging into devices in production.
-    TACACS_PASSWORD is the password for logging into devices in production.
-    BENCH_USER is the username for logging into devices on the provisioning benches.
-    BENCH_PASSWORD is the password for logging into devices on the provisioning benches.
+### 🧰 `Get_CKIDs.py`
+**Version:** 5.0
+**Purpose:**
+Used for collecting information from specified devices that are expected to be impacted by maintenance work. Gathers all the CKSIDs in the form of XXXXXXXX/XXXXXX/XXXXXXXX or XXXXXXXX-XXXXXX-XXXXXXXX listed in the configurations on any of our current Cisco routers. The market will still need to provide an impact list for any core equipment, as they are likely to affect services not explicitly listed in configuration files.
 
+# Cisco ASR-920 Bulk Upgrade Automation
 
-# noc-tools/UPGRADES
+## Overview
+This project provides two coordinated Python scripts for automating **bulk software upgrades** of Cisco ASR-920 routers in a production environment.  
+They streamline image downloads, upgrade execution, and validation tasks — supporting concurrent operations, centralized logging, and graceful interruption handling.
 
-The UPGRADES directory contains scripts that are used to prepare and execute IOS and ROMMON upgrades on production Cisco routers.
+These scripts are designed for use by network engineers performing controlled upgrade cycles across access or aggregation rings.
 
-    # 920_DOWNLOAD_CONCURRENT.py
-    Used to download the IOS and ROMMON images for Cisco ASR-920 routers using concurrency to maximize speed when preparing for large scale upgrades.
+---
 
-    # 920_UPGRADE_CONCURRENT.py
-    Used to upgrade IOS and ROMMON images for Cisco ASR-920 routers using concurrency to maximize speed when preparing for large scale upgrades. 
-    *****Must only be run in a scheduled maintenance window*****
+## Scripts Included
 
-    # 540_DOWNLOAD_CONCURRENT.py
-    This script is currently being written to test the best methods and functions to download the IOS images for Cisco NCS540 routers. It is not currently functional but will eventually be recompiled into the UPGRADE_ALL_CONCURRENT.py script to simplify the process of downloading and upgrading all routers.
+### 🧰 `920_DOWNLOAD_CONCURRENT.py`
+**Version:** 3.0  
+**Purpose:**  
+Performs **parallel image downloads** to multiple ASR-920 routers to pre-stage firmware prior to upgrades.
 
-    # UPGRADE_ALL_CONCURRENT.py
-    Currently in development, this script will be used to download and upgrade IOS and ROMMON images for all Cisco routers we use.
+**Key Features**
+- Prompts for authentication credentials and device IPs interactively (with optional `.env` overrides).  
+- Uses Python’s `ThreadPoolExecutor` for **concurrent transfers**.  
+- Executes pre-checks and post-checks to validate file presence and integrity.  
+- Displays **progress bars** via `tqdm`.  
+- Logs all activity and gracefully handles interruptions (`Ctrl+C`).  
+- Verifies dependencies (`Netmiko`, `tqdm`, `python-dotenv`) and assists in installation if missing.
+
+---
+
+### ⚙️ `920_UPGRADE_CONCURRENT.py`
+**Version:** 3.0  
+**Purpose:**  
+Automates **sequential device upgrades** for Cisco IOS-XE (ASR-920) routers — upgrading one device per ring to maintain service continuity.
+
+**Key Features**
+- Automatically authenticates and connects to target devices via Netmiko.  
+- Runs **pre-upgrade checks**, triggers the upgrade, and performs **post-upgrade validation**.  
+- Provides error-resilient logging, thread control, and graceful shutdowns.  
+- Includes dependency checks and user prompts for missing packages.
+
+---
+
+## Requirements
+
+- **Python 3.9+**
+- External packages:
+  - [`netmiko`](https://pypi.org/project/netmiko/) – SSH connection automation  
+  - [`tqdm`](https://pypi.org/project/tqdm/) – Progress bar utility  
+  - [`python-dotenv`](https://pypi.org/project/python-dotenv/) – Environment variable loader  
+
+---
+
+## Installation
+
+1. **Clone or copy** this project to your local environment.
+
+2. (Optional) Create a virtual environment:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate       # macOS/Linux
+   .venv\Scripts\activate          # Windows
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Place your `.env` file** in the main directory (...\noc-tools\)
+
+---
+
+## Environment Configuration (`.env`)
+
+> The scripts **prompt interactively** for anything not provided in `.env`.  
+> At runtime, you will also be asked to **choose an environment profile**:  
+> **ENTER** → generic defaults, **1** → **production**, **2** → **provisioning**.
+
+### Generic (fallback) values
+These are used when no profile-specific override is set:
+```env
+FTP_SERVER=10.0.0.1          # IP address (v4 or v6)
+FTP_USER=ftpuser
+FTP_PASSWORD=changeme
+
+DEVICE_USERNAME=             # optional; if blank you'll be prompted
+DEVICE_PASSWORD=
+```
+
+### Optional profile-based overrides
+If you choose **Production** at the prompt, the script prefers `*_PROD`;  
+if you choose **Provisioning**, it prefers `*_PROV`. Missing values fall back to the generic keys above, then to interactive prompts.
+```env
+# Production overrides (optional)
+FTP_SERVER_PROD=10.0.0.2
+FTP_USER_PROD=
+FTP_PASSWORD_PROD=
+
+DEVICE_USERNAME_PROD=
+DEVICE_PASSWORD_PROD=
+
+# Provisioning overrides (optional)
+FTP_SERVER_PROV=10.10.0.10
+FTP_USER_PROV=
+FTP_PASSWORD_PROV=
+
+DEVICE_USERNAME_PROV=
+DEVICE_PASSWORD_PROV=
+```
+
+### Other optional settings (not currently used in any scripts)
+```env
+# Directory for saving logs and reports (default: logs/)
+LOG_PATH=logs/
+
+# Optional device list file
+DEVICE_LIST=data/devices.txt
+```
+
+> 🔒 **Security note:** Never commit `.env` with secrets to version control. Add `.env` to `.gitignore` and ship a `.env.example` without secrets.
+
+---
+
+## Usage
+
+### 1. Pre-stage device images
+```bash
+python 920_DOWNLOAD_CONCURRENT.py
+```
+You will see:
+```
+Select environment profile:
+  1. Production
+  2. Provisioning
+  (Press ENTER to use generic defaults)
+Enter choice [1/2 or ENTER]:
+Enter number of rings: 
+Enter number of nodes in ring0:
+Enter node0 IP: 
+Enter node1 IP: 
+...
+Enter number of nodes in ring1: 
+...
+********ring0node0IP********
+********ring0node1IP********
+********ring0node2IP********
+********ring0node3IP********
+...
+```
+A progress bar at the bottom will show the progress of the script.
+
+### 2. Execute upgrades sequentially by ring
+```bash
+python 920_UPGRADE_CONCURRENT.py
+```
+
+**Notes:**
+- Devices can be entered manually or loaded from a file.  
+- Progress and status will be shown for each device.  
+- Logs are written to the directory defined in `LOG_PATH` (default: `logs/`).  
+
+---
+
+## Logging and Output
+
+- Each run generates timestamped logs (e.g. `upgrade_2025-10-06.log`).  
+- Logs capture authentication, file transfer status, success/failure flags, and exceptions.  
+- Console output shows summarized progress with color-coded status indicators if supported.
+
+---
+
+## Graceful Shutdown
+
+Both scripts trap `SIGINT` (Ctrl+C).  
+If interrupted:
+- Active SSH sessions are closed cleanly.  
+- Partially completed device tasks are logged.  
+- Threads are safely terminated without leaving orphaned processes.
+
+---
+
+## Common Errors & Troubleshooting
+
+| Issue | Possible Cause | Resolution |
+|-------|----------------|-------------|
+| **`ModuleNotFoundError: No module named 'netmiko'`** | Dependency not installed | Run `pip install -r requirements.txt` |
+| **Invalid FTP IP** | `FTP_SERVER` not an IP address | Use a valid IPv4/IPv6 address or re-enter when prompted |
+| **Authentication failures** | Wrong username/password or creds unset | Provide in `.env` or re-enter at prompt |
+| **Timeouts during file transfer** | Slow network / unreachable host | Verify connectivity or adjust thread count if applicable |
+| **`OSError: [Errno 24] Too many open files`** | Too many parallel SSH sessions | Reduce concurrency level in script configuration |
+
+---
+
+## Best Practices
+
+- Run during approved maintenance windows.  
+- Test on a lab ring before production execution.  
+- Maintain an offline copy of current firmware images.  
+- Always back up configurations before starting bulk upgrades.  
+- Review log output after each operation.
+
+---
+
+## Author
+**Adam Tafoya**
+
+---
+
+## License
+This project is provided for internal network automation use.  
+No warranty is expressed or implied. Use at your own risk.

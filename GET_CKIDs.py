@@ -1,10 +1,10 @@
 #!/usr/bin/python3
 
 ###############################################################################
-#   GET_CKIDs.py Ver 4.0                                                        #
+#   GET_CKIDs.py Ver 5.0                                                      #
 #   Author: Adam Tafoya                                                       #
 # Dependencies:                                                               #
-#   Netmiko, getpass, datetime, logging, re                                   #
+#   Netmiko                                                                   #
 # Script Description:                                                         #
 #   This Python script collects circuit IDs from a list of network devices    #
 #   provided by the user. The script prompts the user for authentication      #
@@ -113,7 +113,7 @@ def device_connect(ip, device_type):
     }
 
     connection = ConnLogOnly(
-        log_file="GET_CKIDs_errors.log",
+        log_file="GET_CKIDs_err.log",
         log_level=logging.ERROR,
         log_format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
         **device,
@@ -194,6 +194,7 @@ def get_ckids(connection):
         # Establish connection
         connection.establish_connection()
         # Send commands
+        connection.send_command("terminal length 0")
         running_cfg = connection.send_command(config_cmd)
         voice_check = connection.send_command(voice_cmd)
         # Disconnect

@@ -1,9 +1,10 @@
 #!/usr/bin/python3
 
 #####################################################################################
-#   920_UPGRADE_CONCURRENT.py Ver 2.0.0                                             #
+#   920_UPGRADE_CONCURRENT.py Ver 3.0                                               #
 #   Author: Adam Tafoya                                                             #
 # Dependencies:                                                                     #
+#   Python 3.9+                                                                     #
 #   Netmiko                                                                         #
 # Script Description:                                                               #
 #   This Python script is designed for bulk upgrading Cisco IOS-XE devices,         #
@@ -17,7 +18,10 @@
 #   error logging and provides a graceful shutdown mechanism.                       #
 #####################################################################################
 
+import importlib
 import importlib.util
+from importlib import metadata
+import os
 import sys
 import time
 from datetime import datetime
@@ -29,7 +33,12 @@ import getpass
 from netmiko import ConnectHandler
 import threading
 import traceback
-import os
+import subprocess
+import platform
+from tqdm import tqdm
+from dotenv import load_dotenv
+from typing import Optional, Tuple, Dict, Callable
+import ipaddress
 
 
 class ConnectionError(Exception):
@@ -145,66 +154,279 @@ def write_to_log_file(file_path, data):
         traceback.print_exc()
 
 
-# Function to check if a package is installed. Used for checking Netmiko.
-def check_dependency(package_name):
-    """Check if a package is installed."""
-    spec = importlib.util.find_spec(package_name)
-    return spec is not None
+# Map: import_name -> pip_name
+REQUIRED_PACKAGES = {
+    "dotenv": "python-dotenv",
+    "tqdm": "tqdm",
+    "netmiko": "netmiko",
+}
 
 
-# Function to install a package using pip. Used to install Netmiko if
-# dependency check fails.
-def install_package(package_name):
-    """Install a package using pip."""
-    import subprocess
-
-    subprocess.check_call(
-        [sys.executable, "-m", "pip", "install", package_name]
-    )
+def _is_installed(import_name: str) -> bool:
+    return importlib.util.find_spec(import_name) is not None
 
 
-# Check if netmiko is installed
-if not check_dependency("netmiko"):
-    print("netmiko is not installed. Would you like to install it now? (y/n)")
-    choice = input().lower()
-    if choice == "y":
-        install_package("netmiko")
-    else:
-        print(
-            "netmiko is required for this script to run. Please install it " \
-                "and try again."
+def _installed_version(pip_name: str) -> str:
+    try:
+        return metadata.version(pip_name)
+    except metadata.PackageNotFoundError:
+        return ""
+
+
+def _pip_install(*args: str) -> int:
+    # Use the same interpreter that's running this script
+    cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    cmd += list(args)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Print output only on non-zero exit to aid debugging
+    if proc.returncode != 0:
+        print(proc.stdout)
+    return proc.returncode
+
+
+def ensure_dependencies(requirements: dict = REQUIRED_PACKAGES) -> None:
+    """Ensure required packages are installed, or attempt to install them."""
+    missing = [imp for imp in requirements if not _is_installed(imp)]
+    if not missing:
+        return
+    # Install missing by their pip names
+    to_install = [requirements[imp] for imp in missing]
+    rc = _pip_install(*to_install)
+    if rc != 0:
+        raise SystemExit(
+            "Failed to install required packages: "
+            + ", ".join(to_install)
+            + "\nTip: run with admin/venv privileges or install manually using:\n"
+            + f"{sys.executable} -m pip install " + " ".join(to_install)
         )
-        sys.exit(1)
+    # Verify imports now work
+    still_missing = [imp for imp in requirements if not _is_installed(imp)]
+    if still_missing:
+        details = []
+        for imp in still_missing:
+            pipn = requirements[imp]
+            details.append(f"{imp} (pip name: {pipn}, version seen: '{_installed_version(pipn) or 'not found'}')")
+        raise SystemExit(
+            "Packages were installed but imports still failed (interpreter mismatch?).\n"
+            + "\n".join(details)
+            + "\nMake sure you installed into the SAME interpreter:\n"
+            + f"{sys.executable} -m pip show python-dotenv tqdm netmiko"
+        )
 
 
 # Function to handle graceful shutdown
-def graceful_shutdown():
-    logging.info("Shutting down gracefully...")
-    sys.exit(0)
+def graceful_shutdown(signum, frame):
+    """
+    Handle graceful shutdown to prevent resource leaks and ensure smooth operation.
+
+    :param int signum: Signal number
+    :param object frame: Frame object
+    """
+    try:
+        # Check for null pointer references
+        if logger is not None:
+            logger.info("Shutting down gracefully...")
+
+        # Check for unhandled exceptions
+        if sys.exc_info()[0]:  # pylint: disable=unused-variable
+            # If there are unhandled exceptions, print them
+            exc = sys.exc_info()[1]  # pylint: disable=unused-variable
+            tb = sys.exc_info()[2]  # pylint: disable=unused-variable
+            traceback.print_exception(exc, exc.__dict__, tb)
+
+        # Exit gracefully
+        sys.exit(0)
+
+    except Exception:  # pylint: disable=broad-except
+        # If an exception occurs during shutdown, print the stack trace
+        traceback.print_exc()
 
 
-# Register signal handlers for graceful shutdown
-signal.signal(signal.SIGINT, graceful_shutdown)
-signal.signal(signal.SIGTERM, graceful_shutdown)
+def signal_registration():
+    """
+    Register signal handlers for graceful shutdown.
+    """
+    try:
+        signal.signal(signal.SIGINT, graceful_shutdown)
+        signal.signal(signal.SIGTERM, graceful_shutdown)
+    except AttributeError:
+        logger.debug(
+            "The 'signal' module is not available. Skipping signal handlers."
+        )
+    except Exception:  # pylint: disable=broad-except
+        # If an exception occurs during signal handler setup, print the stack trace
+        traceback.print_exc()
+
+
+def load_env() -> None:
+    """Load environment from .env if present."""
+    load_dotenv()
+
+
+def prompt_profile() -> str:
+    """
+    Ask the user which environment to use.
+    Returns: '' | 'production' | 'provisioning'
+    """
+    while True:
+        tqdm.write("\nSelect environment profile:")
+        tqdm.write("  1. Production")
+        tqdm.write("  2. Provisioning")
+        tqdm.write("  (Press ENTER to use generic defaults)")
+        choice = input("Enter choice [1/2 or ENTER]: ").strip().lower()
+
+        if choice == "":                 # default: generic
+            return ""
+        if choice in ("1", "prod", "production"):
+            return "production"
+        if choice in ("2", "prov", "provisioning"):
+            return "provisioning"
+
+        tqdm.write("Invalid choice. Please enter 1, 2, or press ENTER for default.")
+
+
+def is_nonempty(v: str) -> bool:
+    return bool((v or "").strip())
+
+
+def is_ip(v: str) -> bool:
+    try:
+        ipaddress.ip_address((v or "").strip())
+        return True
+    except Exception:
+        return False
+    
+
+def get_env_or_prompt_loop_multi(
+    env_keys: Tuple[str, ...],
+    label: str,
+    *,
+    secret: bool = False,
+    validator: Optional[Callable[[str], bool]] = None,
+    error_hint: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    normalizer: Callable[[str], str] = lambda s: s.strip(),
+) -> str:
+    """Try multiple env keys in order; if missing/invalid, prompt until valid."""
+    e = env or os.environ
+    value = ""
+    for k in env_keys:
+        v = e.get(k, "")
+        if v and v.strip():
+            value = normalizer(v)
+            break
+
+    while True:
+        if value and (validator is None or validator(value)):
+            return value
+
+        if value and validator and not validator(value):
+            tqdm.write(error_hint or f"Invalid {label}. Please try again.")
+
+        tqdm.write(f"Enter {label}:")
+        prompt = f"{label}: "
+        value = getpass(prompt) if secret else input(prompt)
+        value = normalizer(value)
+
+        if not validator:
+            if is_nonempty(value):
+                return value
+            tqdm.write(f"{label} must not be empty. Please try again.")
+
+
+def env_first(env: Optional[Dict[str, str]], *keys: str) -> Optional[str]:
+    e = env or os.environ
+    for k in keys:
+        v = e.get(k)
+        if v and v.strip():
+            return v.strip()
+    return None
+
+
+def get_device_credentials(profile: Optional[str] = None,
+                           env: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
+    e = env or os.environ
+    if profile == "production":
+        username = env_first(e, "DEVICE_USERNAME_PROD", "DEVICE_USERNAME")
+        password = env_first(e, "DEVICE_PASSWORD_PROD", "DEVICE_PASSWORD")
+    elif profile == "provisioning":
+        username = env_first(e, "DEVICE_USERNAME_PROV", "DEVICE_USERNAME")
+        password = env_first(e, "DEVICE_PASSWORD_PROV", "DEVICE_PASSWORD")
+    else:
+        username = env_first(e, "DEVICE_USERNAME")
+        password = env_first(e, "DEVICE_PASSWORD")
+
+    # Prompt for any missing piece
+    if not is_nonempty(username or ""):
+        username = get_env_or_prompt_loop_multi(("DEVICE_USERNAME",), "device username",
+                                                secret=False, validator=is_nonempty,
+                                                error_hint="Username must not be empty.", env=e)
+    if not is_nonempty(password or ""):
+        password = get_env_or_prompt_loop_multi(("DEVICE_PASSWORD",), "device password",
+                                                secret=True, validator=is_nonempty,
+                                                error_hint="Password must not be empty.", env=e)
+    return username, password
 
 
 def list_append():
     """
-    Function to collect IP addresses of nodes in each ring.
-    Prompts user to enter number of rings and nodes in each ring.
-    Organizes IP addresses into list of lists, with inner list representing
-    nodes in a ring. Returns list of lists containing IP addresses of nodes.
+    A function that prompts the user to enter the number of rings and nodes
+    in each ring. It then collects the IP addresses for each node and organizes
+    them into a list of lists, where each inner list represents the nodes in a
+    ring. Returns the list of lists containing the IP addresses of the nodes.
     """
-    ring_count = input("Enter number of rings: ")
-    list = []
-    for i in range(int(ring_count)):
-        nodes_in_ring = input(f"Enter number of nodes in ring{str(i)}: ")
-        ring_list = [
-            input(f"Enter node{str(j)} IP: ")
-            for j in range(int(nodes_in_ring))
-        ]
-        list.append(ring_list)
-    return list
+    try:
+        # Check for null pointer references
+        ring_count = input("Enter number of rings: ")
+        if ring_count is None:
+            raise ValueError("ring_count is None")
+
+        # Check for unhandled exceptions
+        if sys.exc_info()[0]:  # pylint: disable=unused-variable
+            # If there are unhandled exceptions, print them
+            exc = sys.exc_info()[1]  # pylint: disable=unused-variable
+            tb = sys.exc_info()[2]  # pylint: disable=unused-variable
+            traceback.print_exception(exc, exc.__dict__, tb)
+
+        # Get the number of rings
+        num_rings = int(ring_count)
+
+        # Initialize the list to store the IP addresses of the nodes
+        ip_list = []
+
+        # Get the IP addresses of the nodes in each ring
+        for i in range(num_rings):
+            nodes_in_ring = input(f"Enter number of nodes in ring{str(i)}: ")
+            if nodes_in_ring is None:
+                raise ValueError("nodes_in_ring is None")
+
+            # Get the number of nodes in the current ring
+            num_nodes_in_ring = int(nodes_in_ring)
+
+            # Initialize the list to store the IP addresses of the nodes in the current ring
+            ring_list = []
+
+            # Get the IP addresses of the nodes in the current ring
+            for j in range(num_nodes_in_ring):
+                node_ip = input(f"Enter node{str(j)} IP: ")
+                if node_ip is None:
+                    raise ValueError("node_ip is None")
+                elif not is_ip(node_ip):
+                    raise ValueError(f"Invalid IP address: {node_ip}")
+                else:
+                    # Append the IP address to the list
+                    ring_list.append(node_ip)
+
+            # Append the list of IP addresses of the nodes in the current ring to the main list
+            ip_list.append(ring_list)
+
+        # Return the list of lists containing the IP addresses of the nodes
+        return ip_list
+
+    except Exception:  # pylint: disable=broad-except
+        # If an exception occurs during function execution, print the stack trace
+        traceback.print_exc()
+        return None
 
 
 def ping(host):
@@ -218,8 +440,6 @@ def ping(host):
     Returns:
         bool: True if the host is pingable, False otherwise.
     """
-    import platform
-    import subprocess
 
     # Determine the ping command based on the operating system
     param = "-n" if platform.system().lower() == "windows" else "-c"
@@ -836,58 +1056,97 @@ def main():
     Returns:
         None
     """
+    # start signal handler
+    signal_registration()
+
+    # Start timer
     start_time = datetime.now()
+
+    # Initialize global variables for username and password
     global username
     global password
-    print("Enter your username:")
-    username = input()
-    print("Enter your password:")
-    password = getpass.getpass()
+    
+    # Load environment variables from .env file
+    load_env()
+
+    # Ask the user which environment to use
+    profile = prompt_profile()      # '' | 'production' | 'provisioning'
+
+    # Get the username and password from the user
+    username, password = get_device_credentials(profile=profile)
+
+    # Send username to logger
     logger.info(f"User authenticated as {username}")
     logger.info("Retrieving list of devices to upgrade...")
+    
+    # Get list of devices to upgrade
     reload_list = list_append()
+    if not reload_list:
+        raise ValueError("router_list must not be empty")
+    
+    # Set the maximum number of workers for the ThreadPoolExecutor to the number of rings
     max_workers = len(reload_list)
+    
     # Initialize lists to capture upgrade results
     all_nodes_down = []
     all_could_not_upgrade = []
     all_failed_to_restore = []
+
+    # Calculate the total number of devices
+    total_devices = sum(len(ring) for ring in reload_list)
+
+    # Initialize progress bar
+    progress_bar = tqdm(total=total_devices, desc='Total Upgrade Progress', dynamic_ncols=True, leave=False)
+    lock = threading.Lock()
+
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Map upgrade function to devices and capture results
-        results = executor.map(upgrade, reload_list)
-        # Iterate through results and capture upgrade outcome for each device
-        for result in results:
-            nodes_down, could_not_upgrade, failed_to_restore = result
-            all_nodes_down.extend(nodes_down)
-            all_could_not_upgrade.extend(could_not_upgrade)
-            all_failed_to_restore.extend(failed_to_restore)
-    # Write results to log files
-    end_time = datetime.now()
-    write_to_log_file(devices_down_log, all_nodes_down)
-    write_to_log_file(could_not_upgrade_log, all_could_not_upgrade)
-    write_to_log_file(failed_to_restore_log, all_failed_to_restore)
-    logger.info("Script execution completed.")
-    logger.info(f"Script execution time: {end_time - start_time}")
-    print("#" * 60)
-    print("\n")
-    print("Total time: {}".format(end_time - start_time))
-    print("\n")
+        try:
+            results = executor.map(upgrade, reload_list, [progress_bar]*len(reload_list), [lock]*len(reload_list))
+            # Iterate through results and capture upgrade outcome for each device
+            for result in results:
+                nodes_down, could_not_upgrade, failed_to_restore = result
+                all_nodes_down.extend(nodes_down)
+                all_could_not_upgrade.extend(could_not_upgrade)
+                all_failed_to_restore.extend(failed_to_restore)
+            # Write results to log files
+            end_time = datetime.now()
+            write_to_log_file(devices_down_log, all_nodes_down)
+            write_to_log_file(could_not_upgrade_log, all_could_not_upgrade)
+            write_to_log_file(failed_to_restore_log, all_failed_to_restore)
+            logger.info("Script execution completed.")
+            logger.info(f"Script execution time: {end_time - start_time}")
+            print("#" * 60)
+            print("\n")
+            print("Total time: {}".format(end_time - start_time))
+            print("\n")
+            return 0
+        
+        except KeyboardInterrupt:
+            tqdm.write("KeyboardInterrupt: Exiting program")
+            return 130
+
+        except Exception as e:
+            logger.error(f"An error occurred during execution: {e}")
+            return 1
+        
 
 
 if __name__ == "__main__":
-
-    # Ensure python 3.6 or higher is installed
-    if not sys.version_info.major == 3 and sys.version_info.minor >= 6:
-        print(
+    # Ensure python 3.9 or higher is installed
+    if sys.version_info.major != 3 and sys.version_info.minor >= 9:
+        tqdm.write(
             "Your Python version is outdated and may not be compatible with this "
             "script."
         )
-        print("Please consider updating Python to version 3.6 or later.")
-        print(
+        tqdm.write("Please consider updating Python to version 3.9 or later.")
+        tqdm.write(
             "You can download the latest version from: "
             "https://www.python.org/downloads/"
         )
         sys.exit(1)
-
-    main()
-
-quit()
+    ensure_dependencies()  # ensures dotenv, tqdm, netmiko exist
+    from dotenv import load_dotenv
+    from tqdm import tqdm
+    from netmiko import ConnectHandler  # or ConnLogOnly
+    raise SystemExit(main())

@@ -6,6 +6,7 @@ UPGRADES/netmiko.log
 UPGRADES/reload920test.log
 UPGRADES/upgrade_error.log
 GET_CKIDs_errors.log
+GET_CKIDs_err.log
 UPGRADES/logs/could_not_upgrade.log
 UPGRADES/logs/device_info.log
 UPGRADES/logs/failed_to_restore.log
