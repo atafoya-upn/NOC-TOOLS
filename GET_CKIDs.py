@@ -23,6 +23,153 @@ from netmiko import SSHDetect, ConnLogOnly
 from datetime import datetime
 import logging
 import shutil
+import os
+from dotenv import load_dotenv
+from typing import Optional, Tuple, Dict, Callable
+import importlib
+import importlib.util
+from importlib import metadata
+import subprocess
+import sys
+
+
+# Map: import_name -> pip_name
+REQUIRED_PACKAGES = {
+    "dotenv": "python-dotenv",
+    "netmiko": "netmiko",
+}
+
+
+def _is_installed(import_name: str) -> bool:
+    return importlib.util.find_spec(import_name) is not None
+
+
+def _installed_version(pip_name: str) -> str:
+    try:
+        return metadata.version(pip_name)
+    except metadata.PackageNotFoundError:
+        return ""
+
+
+def _pip_install(*args: str) -> int:
+    # Use the same interpreter that's running this script
+    cmd = [sys.executable, "-m", "pip", "install", "--disable-pip-version-check"]
+    cmd += list(args)
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    # Print output only on non-zero exit to aid debugging
+    if proc.returncode != 0:
+        print(proc.stdout)
+    return proc.returncode
+
+
+def ensure_dependencies(requirements: dict = REQUIRED_PACKAGES) -> None:
+    """Ensure required packages are installed, or attempt to install them."""
+    missing = [imp for imp in requirements if not _is_installed(imp)]
+    if not missing:
+        return
+    # Install missing by their pip names
+    to_install = [requirements[imp] for imp in missing]
+    rc = _pip_install(*to_install)
+    if rc != 0:
+        raise SystemExit(
+            "Failed to install required packages: "
+            + ", ".join(to_install)
+            + "\nTip: run with admin/venv privileges or install manually using:\n"
+            + f"{sys.executable} -m pip install " + " ".join(to_install)
+        )
+    # Verify imports now work
+    still_missing = [imp for imp in requirements if not _is_installed(imp)]
+    if still_missing:
+        details = []
+        for imp in still_missing:
+            pipn = requirements[imp]
+            details.append(f"{imp} (pip name: {pipn}, version seen: '{_installed_version(pipn) or 'not found'}')")
+        raise SystemExit(
+            "Packages were installed but imports still failed (interpreter mismatch?).\n"
+            + "\n".join(details)
+            + "\nMake sure you installed into the SAME interpreter:\n"
+            + f"{sys.executable} -m pip show python-dotenv tqdm netmiko"
+        )
+
+
+def load_env() -> None:
+    """Load environment from .env if present."""
+    load_dotenv()
+
+
+def is_nonempty(v: str) -> bool:
+    return bool((v or "").strip())
+
+
+def get_env_or_prompt_loop_multi(
+    env_keys: Tuple[str, ...],
+    label: str,
+    *,
+    secret: bool = False,
+    validator: Optional[Callable[[str], bool]] = None,
+    error_hint: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+    normalizer: Callable[[str], str] = lambda s: s.strip(),
+) -> str:
+    """Try multiple env keys in order; if missing/invalid, prompt until valid."""
+    e = env or os.environ
+    value = ""
+    for k in env_keys:
+        v = e.get(k, "")
+        if v and v.strip():
+            value = normalizer(v)
+            break
+
+    while True:
+        if value and (validator is None or validator(value)):
+            return value
+
+        if value and validator and not validator(value):
+            print(error_hint or f"Invalid {label}. Please try again.")
+
+        print(f"Enter {label}:")
+        prompt = f"{label}: "
+        value = getpass(prompt) if secret else input(prompt)
+        value = normalizer(value)
+
+        if not validator:
+            if is_nonempty(value):
+                return value
+            print(f"{label} must not be empty. Please try again.")
+
+
+def env_first(env: Optional[Dict[str, str]], *keys: str) -> Optional[str]:
+    e = env or os.environ
+    for k in keys:
+        v = e.get(k)
+        if v and v.strip():
+            return v.strip()
+    return None
+
+
+def get_device_credentials(profile: Optional[str] = None,
+                           env: Optional[Dict[str, str]] = None) -> Tuple[str, str]:
+    e = env or os.environ
+    if profile == "production":
+        username = env_first(e, "DEVICE_USERNAME_PROD", "DEVICE_USERNAME")
+        password = env_first(e, "DEVICE_PASSWORD_PROD", "DEVICE_PASSWORD")
+    elif profile == "provisioning":
+        username = env_first(e, "DEVICE_USERNAME_PROV", "DEVICE_USERNAME")
+        password = env_first(e, "DEVICE_PASSWORD_PROV", "DEVICE_PASSWORD")
+    else:
+        username = env_first(e, "DEVICE_USERNAME")
+        password = env_first(e, "DEVICE_PASSWORD")
+
+    # Prompt for any missing piece
+    if not is_nonempty(username or ""):
+        username = get_env_or_prompt_loop_multi(("DEVICE_USERNAME",), "device username",
+                                                secret=False, validator=is_nonempty,
+                                                error_hint="Username must not be empty.", env=e)
+    if not is_nonempty(password or ""):
+        password = get_env_or_prompt_loop_multi(("DEVICE_PASSWORD",), "device password",
+                                                secret=True, validator=is_nonempty,
+                                                error_hint="Password must not be empty.", env=e)
+    return username, password
 
 
 def get_list_of_devices():
@@ -180,7 +327,7 @@ def get_ckids(connection):
     # Define regex patterns and compile them
     hostname_pat = r"(?:hostname\s+\b)([-\w]+\b)"
     host_pat = re.compile(hostname_pat)
-    circuit_pat = r"([A-Z]{6}\w{2}[-/][A-Z]{3}\w{3}[-/][A-Z]{6}\w{2})"
+    circuit_pat = r"([A-Z]{6}\w{2}[-/][A-Z]{3}\w{3,4}[-/][A-Z]{6}\w{2})"
     c_pat = re.compile(circuit_pat)
     voice_pat = r"(?:description.*)(WL.?[0-9]{5})"
     v_pat = re.compile(voice_pat)
@@ -246,10 +393,12 @@ def main():
     # Get the username and password from the user
     global username
     global password
-    print("Enter your username:")
-    username = input("Username: ")
-    print("Enter your password:")
-    password = getpass()
+
+    # Load environment variables from .env file
+    load_env()
+    profile = "production"
+    # Get device credentials based on profile. If profile is None, prompt user for input
+    username, password = get_device_credentials(profile=profile)
     # Get the list of ASR-920 IP addresses from the user
     list_of_devices = get_list_of_devices()
     print("Gathering device information...")
@@ -308,4 +457,19 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # Ensure python 3.9 or higher is installed
+    if sys.version_info.major != 3 and sys.version_info.minor >= 9:
+        print(
+            "Your Python version is outdated and may not be compatible with this "
+            "script."
+        )
+        print("Please consider updating Python to version 3.9 or later.")
+        print(
+            "You can download the latest version from: "
+            "https://www.python.org/downloads/"
+        )
+        sys.exit(1)
+    ensure_dependencies()  # ensures dotenv, tqdm, netmiko exist
+    from dotenv import load_dotenv
+    from netmiko import ConnLogOnly
+    raise SystemExit(main())
